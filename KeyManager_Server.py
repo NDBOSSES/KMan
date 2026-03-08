@@ -7,7 +7,7 @@ import io
 import traceback
 
 # ---------- Configuration ----------
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "licenses.db")
+DB_PATH = "/data/licenses.db"
 
 
 # ---------- Utilities ----------
@@ -1088,3 +1088,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     print(f"📡 Server configured for port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
