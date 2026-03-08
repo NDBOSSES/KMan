@@ -1,12 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import sqlite3
 import time
 import os
+import io
 import traceback
-from flask_cors import CORS
 
 # ---------- Configuration ----------
-# Use application directory instead of /tmp for better cross-platform compatibility
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "licenses.db")
 
 
@@ -26,7 +26,6 @@ def ensure_db_directory():
     """Ensure the database directory exists and is writable"""
     db_dir = os.path.dirname(DB_PATH)
 
-    # If no directory (file in current dir), no need to create
     if not db_dir or db_dir == "":
         db_dir = "."
 
@@ -38,7 +37,6 @@ def ensure_db_directory():
             print(f"❌ Failed to create directory {db_dir}: {e}")
             return False
 
-    # Test write permissions
     test_file = os.path.join(db_dir, ".write_test")
     try:
         with open(test_file, "w") as f:
@@ -56,7 +54,6 @@ def init_db():
     try:
         print(f"🔄 Initializing database at: {DB_PATH}")
 
-        # Ensure directory exists and is writable
         if not ensure_db_directory():
             print("❌ Cannot access database directory")
             return False
@@ -64,7 +61,6 @@ def init_db():
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Base licenses table
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS licenses(
@@ -80,7 +76,6 @@ def init_db():
         """
         )
 
-        # license_accounts table
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS license_accounts(
@@ -99,7 +94,6 @@ def init_db():
         """
         )
 
-        # predefined_accounts table
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS predefined_accounts(
@@ -129,7 +123,6 @@ def migrate_db():
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
@@ -165,7 +158,6 @@ def ensure_db_initialized():
             print("📦 Database tables missing, initializing...")
             return init_db()
         else:
-            # Tables exist, check for migrations
             conn.close()
             migrate_db()
         return True
@@ -182,7 +174,6 @@ def get_license_by_code(code):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
@@ -192,15 +183,13 @@ def get_license_by_code(code):
                 (code,),
             )
         else:
-            # Fallback for old schema
             c.execute(
                 "SELECT id, owner, code, ea_name, max_accounts, expiry FROM licenses WHERE code=?",
                 (code,),
             )
             row = c.fetchone()
             if row:
-                # Add default active status
-                row = row + (1,)  # Add active=1 as default
+                row = row + (1,)
 
         row = c.fetchone()
         conn.close()
@@ -245,8 +234,6 @@ def add_or_update_account(
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # First check if license is active
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
@@ -257,7 +244,6 @@ def add_or_update_account(
                 conn.close()
                 return "LICENSE_DEACTIVATED"
 
-        # Check if account is in predefined list
         c.execute(
             "SELECT account_name FROM predefined_accounts WHERE license_id=? AND account_number=?",
             (license_id, account_number),
@@ -265,7 +251,6 @@ def add_or_update_account(
         row = c.fetchone()
 
         if row:
-            # Use predefined name if exists
             predefined_name = row[0]
             if predefined_name and not account_name:
                 account_name = predefined_name
@@ -275,7 +260,6 @@ def add_or_update_account(
 
         now = now_ts()
 
-        # Check if account already exists
         c.execute(
             "SELECT id FROM license_accounts WHERE license_id=? AND account_number=?",
             (license_id, account_number),
@@ -283,7 +267,6 @@ def add_or_update_account(
         row = c.fetchone()
 
         if row:
-            # Update existing account
             acct_id = row[0]
             c.execute(
                 """
@@ -297,7 +280,6 @@ def add_or_update_account(
                 (now, account_name, server, balance, equity, acct_id),
             )
         else:
-            # Check max accounts before adding new
             c.execute(
                 "SELECT COUNT(*) FROM license_accounts WHERE license_id=?",
                 (license_id,),
@@ -311,7 +293,6 @@ def add_or_update_account(
                 conn.close()
                 return "MAX_EXCEEDED"
 
-            # Insert new account
             c.execute(
                 """
                 INSERT INTO license_accounts(license_id, account_number, account_name, server, balance, equity, last_seen)
@@ -346,7 +327,6 @@ def list_licenses():
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
@@ -355,7 +335,6 @@ def list_licenses():
                 "SELECT id, owner, code, ea_name, max_accounts, expiry, active FROM licenses ORDER BY expiry ASC"
             )
         else:
-            # Fallback for old schema
             c.execute(
                 "SELECT id, owner, code, ea_name, max_accounts, expiry FROM licenses ORDER BY expiry ASC"
             )
@@ -364,13 +343,12 @@ def list_licenses():
         licenses = []
 
         for row in rows:
-            if len(row) == 7:  # With active column
+            if len(row) == 7:
                 lic_id, owner, code, ea_name, max_acc, expiry, active = row
-            else:  # Without active column (old schema)
+            else:
                 lic_id, owner, code, ea_name, max_acc, expiry = row
-                active = 1  # Default to active for old records
+                active = 1
 
-            # Get active accounts
             c.execute(
                 """
                 SELECT account_number, account_name, server, balance, equity, last_seen
@@ -392,21 +370,18 @@ def list_licenses():
                 for a, n, s, b, q, ls in c.fetchall()
             ]
 
-            # Get predefined accounts
             predefined = get_predefined_accounts_for_license(lic_id)
 
-            # Calculate status with activation check
             now = now_ts()
             status = "active"
 
-            # First check if license is deactivated
             if not active:
                 status = "deactivated"
             elif expiry and now > expiry:
                 status = "expired"
             elif not accounts:
                 status = "inactive"
-            elif expiry and expiry - now < 259200:  # 3 days in seconds
+            elif expiry and expiry - now < 259200:
                 status = "expiring"
 
             licenses.append(
@@ -444,11 +419,9 @@ def store_license(owner, code, ea_name, max_accounts, expiry, predefined_account
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
-        # Add license
         if "active" in columns:
             c.execute(
                 """INSERT OR REPLACE INTO licenses(owner, code, ea_name, max_accounts, expiry, active)
@@ -456,7 +429,6 @@ def store_license(owner, code, ea_name, max_accounts, expiry, predefined_account
                 (owner, code, ea_name, max_accounts, expiry, 1),
             )
         else:
-            # Fallback for old schema
             c.execute(
                 """INSERT OR REPLACE INTO licenses(owner, code, ea_name, max_accounts, expiry)
                          VALUES (?,?,?,?,?)""",
@@ -465,11 +437,10 @@ def store_license(owner, code, ea_name, max_accounts, expiry, predefined_account
 
         license_id = c.lastrowid
 
-        # Add predefined accounts if provided
         for acc in predefined_accounts:
             acc_number = acc.get("account_number", "").strip()
             acc_name = acc.get("account_name", "").strip()
-            if acc_number:  # Only add if account number is provided
+            if acc_number:
                 try:
                     c.execute(
                         """INSERT INTO predefined_accounts(license_id, account_number, account_name)
@@ -477,7 +448,6 @@ def store_license(owner, code, ea_name, max_accounts, expiry, predefined_account
                         (license_id, acc_number, acc_name),
                     )
                 except sqlite3.IntegrityError:
-                    # Skip duplicates
                     pass
 
         conn.commit()
@@ -513,17 +483,14 @@ def delete_license(code):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Get license ID
         c.execute("SELECT id FROM licenses WHERE code=?", (code,))
         r = c.fetchone()
 
         if r:
             lic_id = r[0]
-            # Delete related records
             c.execute("DELETE FROM license_accounts WHERE license_id=?", (lic_id,))
             c.execute("DELETE FROM predefined_accounts WHERE license_id=?", (lic_id,))
 
-        # Delete license
         c.execute("DELETE FROM licenses WHERE code=?", (code,))
         conn.commit()
         conn.close()
@@ -545,7 +512,6 @@ def edit_license(
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Get license ID
         c.execute("SELECT id FROM licenses WHERE code=?", (code,))
         row = c.fetchone()
         if not row:
@@ -554,7 +520,6 @@ def edit_license(
 
         license_id = row[0]
 
-        # Update license info
         updates = []
         params = []
         if owner is not None:
@@ -572,14 +537,10 @@ def edit_license(
             sql = f"UPDATE licenses SET {', '.join(updates)} WHERE code=?"
             c.execute(sql, params)
 
-        # Update predefined accounts if provided
         if predefined_accounts is not None:
-            # Delete existing predefined accounts
             c.execute(
                 "DELETE FROM predefined_accounts WHERE license_id=?", (license_id,)
             )
-
-            # Add new predefined accounts
             for acc in predefined_accounts:
                 acc_number = acc.get("account_number", "").strip()
                 acc_name = acc.get("account_name", "").strip()
@@ -608,16 +569,13 @@ def toggle_license_active(code, active=None):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
         if "active" not in columns:
-            # If column doesn't exist, add it
             c.execute("ALTER TABLE licenses ADD COLUMN active INTEGER DEFAULT 1")
             conn.commit()
 
-        # If active is not specified, toggle it
         if active is None:
             c.execute("SELECT active FROM licenses WHERE code=?", (code,))
             row = c.fetchone()
@@ -630,7 +588,6 @@ def toggle_license_active(code, active=None):
                 conn.close()
                 return False
         else:
-            # Set specific active state
             c.execute(
                 "UPDATE licenses SET active=? WHERE code=?", (1 if active else 0, code)
             )
@@ -646,16 +603,16 @@ def toggle_license_active(code, active=None):
 
 # ---------- Flask App ----------
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# Initialize database when app starts
 print("🚀 Starting License Server...")
 print(f"✅ Database path: {DB_PATH}")
 if init_db():
     migrate_db()
 
 
-# Health check endpoint (required for EB)
+# ---------- Routes ----------
+
 @app.route("/")
 def health_check():
     try:
@@ -671,10 +628,7 @@ def health_check():
                 }
             )
         else:
-            return (
-                jsonify({"status": "error", "error": "Database initialization failed"}),
-                500,
-            )
+            return jsonify({"status": "error", "error": "Database initialization failed"}), 500
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
@@ -709,17 +663,14 @@ def check():
     if not row:
         return jsonify({"valid": False, "reason": "License not found"})
 
-    # Handle both old and new schema
     if len(row) == 7:
         lic_id, owner, db_code, lic_ea, max_acc, expiry, active = row
     else:
-        # Old schema without active column
         lic_id, owner, db_code, lic_ea, max_acc, expiry = row
-        active = 1  # Default to active
+        active = 1
 
     now = now_ts()
 
-    # Check if license is active
     if not active:
         return jsonify(
             {
@@ -730,7 +681,6 @@ def check():
             }
         )
 
-    # Check expiry
     if expiry and now > expiry:
         return jsonify(
             {
@@ -741,13 +691,9 @@ def check():
             }
         )
 
-    # Check EA name
     if ea_name and lic_ea and lic_ea not in ("", ea_name):
-        return jsonify(
-            {"valid": False, "reason": f"License not valid for EA {ea_name}"}
-        )
+        return jsonify({"valid": False, "reason": f"License not valid for EA {ea_name}"})
 
-    # Register or update account if provided
     if account_number:
         result = add_or_update_account(
             lic_id,
@@ -759,7 +705,6 @@ def check():
         )
 
         if result == "NAME_MISMATCH":
-            # Get the correct account name from predefined
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
@@ -772,10 +717,7 @@ def check():
                 conn.close()
             except:
                 correct_name = "Unknown"
-
-            return jsonify(
-                {"valid": False, "reason": f"Account name must be '{correct_name}'"}
-            )
+            return jsonify({"valid": False, "reason": f"Account name must be '{correct_name}'"})
         elif result == "MAX_EXCEEDED":
             return jsonify({"valid": False, "reason": "Maximum accounts exceeded"})
         elif result == "LICENSE_DEACTIVATED":
@@ -801,26 +743,9 @@ def list_all():
     """List all licenses"""
     try:
         if not ensure_db_initialized():
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": "Database not initialized",
-                        "licenses": [],
-                    }
-                ),
-                500,
-            )
-
+            return jsonify({"success": False, "error": "Database not initialized", "licenses": []}), 500
         licenses = list_licenses()
-        return jsonify(
-            {
-                "success": True,
-                "licenses": licenses,
-                "count": len(licenses),
-                "timestamp": now_ts(),
-            }
-        )
+        return jsonify({"success": True, "licenses": licenses, "count": len(licenses), "timestamp": now_ts()})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e), "licenses": []}), 500
@@ -844,36 +769,16 @@ def add_license():
     predefined_accounts = data.get("predefined_accounts", [])
 
     if not owner or not code or not expiry:
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "error": "Missing required fields (owner, code, expiry)",
-                }
-            ),
-            400,
-        )
+        return jsonify({"success": False, "error": "Missing required fields (owner, code, expiry)"}), 400
 
     try:
-        # Validate predefined accounts if provided
         if predefined_accounts:
             for acc in predefined_accounts:
                 if not acc.get("account_number") or not acc.get("account_name"):
-                    return (
-                        jsonify(
-                            {
-                                "success": False,
-                                "error": "Each predefined account must have both number and name",
-                            }
-                        ),
-                        400,
-                    )
-
+                    return jsonify({"success": False, "error": "Each predefined account must have both number and name"}), 400
             max_accounts = len(predefined_accounts)
 
-        success = store_license(
-            owner, code, ea_name, max_accounts, expiry, predefined_accounts
-        )
+        success = store_license(owner, code, ea_name, max_accounts, expiry, predefined_accounts)
         if success:
             return jsonify({"success": True, "message": "License added successfully"})
         else:
@@ -887,34 +792,19 @@ def add_license():
 def get_predefined_accounts(code):
     """Get predefined accounts for a license"""
     if not ensure_db_initialized():
-        return (
-            jsonify(
-                {"success": False, "error": "Database not available", "accounts": []}
-            ),
-            500,
-        )
+        return jsonify({"success": False, "error": "Database not available", "accounts": []}), 500
 
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-
-        # Get license ID
         c.execute("SELECT id FROM licenses WHERE code=?", (code,))
         row = c.fetchone()
         if not row:
             conn.close()
-            return (
-                jsonify(
-                    {"success": False, "error": "License not found", "accounts": []}
-                ),
-                404,
-            )
+            return jsonify({"success": False, "error": "License not found", "accounts": []}), 404
 
         license_id = row[0]
-
-        # Get predefined accounts
         accounts = get_predefined_accounts_for_license(license_id)
-
         conn.close()
         return jsonify({"success": True, "accounts": accounts})
     except Exception as e:
@@ -983,13 +873,7 @@ def edit_license_route():
     predefined_accounts = data.get("predefined_accounts")
 
     try:
-        success = edit_license(
-            code,
-            owner=owner,
-            ea_name=ea_name,
-            max_accounts=max_accounts,
-            predefined_accounts=predefined_accounts,
-        )
+        success = edit_license(code, owner=owner, ea_name=ea_name, max_accounts=max_accounts, predefined_accounts=predefined_accounts)
         if success:
             return jsonify({"success": True, "message": "License updated successfully"})
         else:
@@ -1014,14 +898,9 @@ def activate_license():
     try:
         success = toggle_license_active(code, active=True)
         if success:
-            return jsonify(
-                {"success": True, "message": "License activated successfully"}
-            )
+            return jsonify({"success": True, "message": "License activated successfully"})
         else:
-            return (
-                jsonify({"success": False, "error": "Failed to activate license"}),
-                500,
-            )
+            return jsonify({"success": False, "error": "Failed to activate license"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1042,14 +921,9 @@ def deactivate_license():
     try:
         success = toggle_license_active(code, active=False)
         if success:
-            return jsonify(
-                {"success": True, "message": "License deactivated successfully"}
-            )
+            return jsonify({"success": True, "message": "License deactivated successfully"})
         else:
-            return (
-                jsonify({"success": False, "error": "Failed to deactivate license"}),
-                500,
-            )
+            return jsonify({"success": False, "error": "Failed to deactivate license"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
@@ -1070,22 +944,45 @@ def toggle_active_license():
     try:
         success = toggle_license_active(code)
         if success:
-            return jsonify(
-                {
-                    "success": True,
-                    "message": "License active state toggled successfully",
-                }
-            )
+            return jsonify({"success": True, "message": "License active state toggled successfully"})
         else:
-            return (
-                jsonify(
-                    {"success": False, "error": "Failed to toggle license active state"}
-                ),
-                500,
-            )
+            return jsonify({"success": False, "error": "Failed to toggle license active state"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/backup")
+def backup_db():
+    """Download the database file"""
+    try:
+        if not os.path.exists(DB_PATH):
+            return jsonify({"error": "Database file not found"}), 404
+        return send_file(
+            DB_PATH,
+            mimetype="application/octet-stream",
+            as_attachment=True,
+            download_name="licenses.db"
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/restore", methods=["POST"])
+def restore_db():
+    """Upload and restore a database file"""
+    try:
+        if "file" not in request.files:
+            return jsonify({"success": False, "error": "No file provided"}), 400
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"success": False, "error": "No file selected"}), 400
+        file.save(DB_PATH)
+        return jsonify({"success": True, "message": "Database restored successfully"})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/initdb")
@@ -1095,16 +992,9 @@ def initdb_route():
         success = init_db()
         if success:
             migrate_db()
-            return jsonify(
-                {"status": "success", "message": "Database initialized successfully"}
-            )
+            return jsonify({"status": "success", "message": "Database initialized successfully"})
         else:
-            return (
-                jsonify(
-                    {"status": "error", "message": "Database initialization failed"}
-                ),
-                500,
-            )
+            return jsonify({"status": "error", "message": "Database initialization failed"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -1116,14 +1006,9 @@ def migrate_route():
     try:
         success = migrate_db()
         if success:
-            return jsonify(
-                {"status": "success", "message": "Database migration completed"}
-            )
+            return jsonify({"status": "success", "message": "Database migration completed"})
         else:
-            return (
-                jsonify({"status": "error", "message": "Database migration failed"}),
-                500,
-            )
+            return jsonify({"status": "error", "message": "Database migration failed"}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -1134,10 +1019,7 @@ def status():
     """Server status and statistics"""
     try:
         if not ensure_db_initialized():
-            return (
-                jsonify({"status": "error", "error": "Database not initialized"}),
-                500,
-            )
+            return jsonify({"status": "error", "error": "Database not initialized"}), 500
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -1152,12 +1034,9 @@ def status():
         predefined_count = c.fetchone()[0]
 
         now = now_ts()
-        c.execute(
-            "SELECT COUNT(*) FROM licenses WHERE expiry IS NULL OR expiry > ?", (now,)
-        )
+        c.execute("SELECT COUNT(*) FROM licenses WHERE expiry IS NULL OR expiry > ?", (now,))
         active_licenses = c.fetchone()[0]
 
-        # Check if active column exists
         c.execute("PRAGMA table_info(licenses)")
         columns = [col[1] for col in c.fetchall()]
 
@@ -1165,9 +1044,7 @@ def status():
             c.execute("SELECT COUNT(*) FROM licenses WHERE active = 1")
             enabled_licenses = c.fetchone()[0]
         else:
-            enabled_licenses = (
-                license_count  # All licenses are enabled if column doesn't exist
-            )
+            enabled_licenses = license_count
 
         conn.close()
 
